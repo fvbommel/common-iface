@@ -34,10 +34,12 @@ import (
 	"fmt"
 	"go/ast"
 	"go/format"
+	"go/parser"
 	"go/token"
 	"go/types"
 	"log"
 	"os"
+	"sort"
 	"strings"
 
 	"golang.org/x/tools/go/loader"
@@ -48,7 +50,8 @@ type argType struct {
 	typ string
 }
 
-var comment = flag.Bool("comment", false, "Include comment about implementing types")
+var comments = flag.Bool("comments", false, "Include doc comments from first type")
+var header = flag.Bool("header", false, "Include header comment about implementing types")
 var private = flag.Bool("private", false, "Include private methods")
 
 func main() {
@@ -63,6 +66,9 @@ func main() {
 	// Figure out what package and type names were passed on the command line.
 	argTypes := []argType{}
 	conf := &loader.Config{}
+	if *comments {
+		conf.ParserMode |= parser.ParseComments
+	}
 	for _, arg := range flag.Args() {
 		idx := strings.LastIndexByte(arg, '.')
 		if idx < 1 {
@@ -97,7 +103,7 @@ func main() {
 	}
 
 	// Get the common methods shared by all specified types.
-	var common map[string]*types.Signature
+	var common map[string]fn
 	for ti, t := range typs {
 		// Wrap the type in a pointer if it might enlarge the method set.
 		if _, isPtr := t.(*types.Pointer); !isPtr && !types.IsInterface(t) {
@@ -107,12 +113,13 @@ func main() {
 
 		// Construct a map from name to method signature.
 		ms := types.NewMethodSet(t)
-		sigs := map[string]*types.Signature{}
+		sigs := map[string]fn{}
 		for i, n := 0, ms.Len(); i < n; i++ {
 			method := ms.At(i)
-			name := method.Obj().Name()
+			obj := method.Obj()
+			name := obj.Name()
 			if *private || ast.IsExported(name) {
-				sigs[name] = method.Type().(*types.Signature)
+				sigs[name] = fn{method.Type().(*types.Signature), obj}
 			}
 		}
 
@@ -122,27 +129,61 @@ func main() {
 		} else {
 			// Remove all methods not implemented by the later type.
 			for k, v := range common {
-				if s, ok := sigs[k]; !ok || !types.Identical(v, s) {
+				if s, ok := sigs[k]; !ok || !types.Identical(v.Signature, s.Signature) {
 					delete(common, k)
 				}
 			}
 		}
 	}
 
-	// Construct an interface type.
-	funcs := []*types.Func{}
-	// Iterating the map directly is fine because order doesn't matter here.
-	// (NewInterface sorts the methods)
-	for name, sig := range common {
-		funcs = append(funcs, types.NewFunc(token.NoPos, nil, name, sig))
+	// Create a sorted list of method names.
+	names := make([]string, 0, len(common))
+	for name := range common {
+		names = append(names, name)
 	}
-	iface := types.NewInterface(funcs, nil).Complete()
+	sort.Strings(names)
+
+	// Prepare a buffer for the output.
+	buf := &bytes.Buffer{}
 
 	// Add a package header to get a complete package.
-	src := []byte(`package common;type T ` +
-		types.TypeString(iface, (*types.Package).Name))
+	fmt.Fprintln(buf, `package common;type T interface{`)
 
-	// Pretty-print.
+	// Add the methods.
+	for _, name := range names {
+		method := common[name]
+
+		// Add doc comment, if requested.
+		if *comments {
+			pos := method.Obj.Pos()
+			_, path, _ := prog.PathEnclosingInterval(pos, pos)
+
+			for _, node := range path[:len(path)-1] {
+				var doc *ast.CommentGroup
+				switch node := node.(type) {
+				case *ast.FuncDecl:
+					doc = node.Doc
+				case *ast.Field:
+					doc = node.Doc
+				}
+				if doc != nil {
+					for _, comment := range doc.List {
+						fmt.Fprintln(buf, comment.Text)
+					}
+					break
+				}
+			}
+		}
+
+		// Add the function signature.
+		sig := types.TypeString(method.Signature, (*types.Package).Name)
+		fmt.Fprintf(buf, "\t%s%s\n", name, strings.TrimPrefix(sig, "func"))
+	}
+
+	fmt.Fprintln(buf, `}`)
+
+	// Pretty-print the buffer, unless we get an error.
+	src := buf.Bytes()
 	if src2, err := format.Source(src); err == nil {
 		src = src2
 	}
@@ -153,11 +194,21 @@ func main() {
 		src = src[idx:]
 	}
 
-	// Print a comment, if requested.
-	if *comment {
+	// Print a header, if requested.
+	if *header {
+		// Construct an interface type so we can check whether we can omit pointers.
+		funcs := []*types.Func{}
+		// Iterating the map directly is fine because order doesn't matter here.
+		// (NewInterface sorts the methods)
+		for name, method := range common {
+			funcs = append(funcs, types.NewFunc(token.NoPos, nil, name, method.Signature))
+		}
+		iface := types.NewInterface(funcs, nil).Complete()
+
+		// Print the actual header.
 		fmt.Println("// Common interface of")
 		for _, typ := range typs {
-			// Remove the pointer if the element type works too.
+			// Don't print a pointer type if the element type implements the interface.
 			if ptr, ok := typ.(*types.Pointer); ok && types.Implements(ptr.Elem(), iface) {
 				typ = ptr.Elem()
 			}
@@ -168,6 +219,11 @@ func main() {
 
 	// Print the result.
 	fmt.Printf("%s", src)
+}
+
+type fn struct {
+	Signature *types.Signature
+	Obj       types.Object
 }
 
 func usage() {
