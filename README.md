@@ -20,8 +20,12 @@ $ common-iface os.File net.Conn
 interface {
 	Close() error
 	Read(b []byte) (n int, err error)
+	SetDeadline(t time.Time) error
+	SetReadDeadline(t time.Time) error
+	SetWriteDeadline(t time.Time) error
 	Write(b []byte) (n int, err error)
 }
+
 ```
 
 This can then e.g. be copy-pasted into a source file to define a local interface type (and optionally trimmed down to remove unused methods).

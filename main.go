@@ -21,6 +21,9 @@
 //		interface {
 //			Close() error
 //			Read(b []byte) (n int, err error)
+//			SetDeadline(t time.Time) error
+//			SetReadDeadline(t time.Time) error
+//			SetWriteDeadline(t time.Time) error
 //			Write(b []byte) (n int, err error)
 //		}
 //
