@@ -203,7 +203,7 @@ func main() {
 		for name, method := range common {
 			funcs = append(funcs, types.NewFunc(token.NoPos, nil, name, method.Signature))
 		}
-		iface := types.NewInterface(funcs, nil).Complete()
+		iface := types.NewInterfaceType(funcs, nil).Complete()
 
 		// Print the actual header.
 		fmt.Println("// Common interface of")
